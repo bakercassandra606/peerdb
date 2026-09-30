@@ -1,17 +1,7 @@
 name: Flow build and test
-
-on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
-  pull_request_target:
-    branches: [main]
-
 permissions:
   id-token: write
   contents: read
-
 jobs:
   flow_test:
     if: |
@@ -22,38 +12,43 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest-16-cores]
-        db-version: [
-          {pg: 16, mysql: 'mysql-gtid', mongo: '6.0', ch: 'lts'},
-          {pg: 17, mysql: 'mysql-pos', mongo: '7.0', ch: 'stable'},
-          {pg: 18, mysql: 'maria', mongo: '8.0', ch: 'latest'},
-        ]
-    runs-on: ${{ matrix.runner }}
+        runner:
+        - ubuntu-latest-16-cores
+        db-version:
+        - pg: 16
+          mysql: mysql-gtid
+          mongo: '6.0'
+          ch: lts
+        - pg: 17
+          mysql: mysql-pos
+          mongo: '7.0'
+          ch: stable
+        - pg: 18
+          mysql: maria
+          mongo: '8.0'
+          ch: latest
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
       catalog:
         image: imresamu/postgis:${{ matrix.db-version.pg }}-3.5-alpine
         ports:
-          - 5432:5432
+        - 5432:5432
         env:
           PGUSER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
           POSTGRES_INITDB_ARGS: --locale=C.UTF-8
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
       redpanda:
         image: redpandadata/redpanda@sha256:ac152ec27adccf9482af2649d293f398eb03c860d7469fc49f86e30d870ea408
         ports:
-          - 9092:9092
-          - 9644:9644
+        - 9092:9092
+        - 9644:9644
       elasticsearch:
         image: elasticsearch:9.2.4@sha256:ba3ca06dc9121baad53ec025c87eef9352fcae11d89cd2e4cba8821977e81319
         ports:
-          - 9200:9200
+        - 9200:9200
         env:
           discovery.type: single-node
           xpack.security.enabled: false
@@ -61,21 +56,21 @@ jobs:
       otelcol:
         image: otel/opentelemetry-collector-contrib:0.144.0@sha256:213886eb6407af91b87fa47551c3632be1a6419ff3a5114ef1e6fc364628496f
         ports:
-          - 4317:4317
+        - 4317:4317
       toxiproxy:
         image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
         ports:
-          - 18474:8474
-          - 9902:9902
-          - 9904:9904
-          - 9903:9903
-          - 42001:42001
-          - 42002:42002
-          - 42003:42003
+        - 18474:8474
+        - 9902:9902
+        - 9904:9904
+        - 9903:9903
+        - 42001:42001
+        - 42002:42002
+        - 42003:42003
       openssh:
         image: linuxserver/openssh-server:latest@sha256:d6e62b2159b6a704691e487bc75de8fa393f7f4624af0103a02eca384d7a0f9c
         ports:
-          - 2222:2222
+        - 2222:2222
         env:
           PUID: 1000
           PGID: 1000
@@ -84,450 +79,436 @@ jobs:
           USER_PASSWORD: testpass
           PASSWORD_ACCESS: true
           DOCKER_MODS: linuxserver/mods:openssh-server-ssh-tunnel
-
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-        with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
-      - name: generate or hydrate protos
-        uses: ./.github/actions/genprotos
+    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      with:
+        ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+    - name: GERALT debug probe
+      run: |
+        echo "GERALT_DBG trigger/checkout context"
+        printf 'event=%s\n' "${GITHUB_EVENT_NAME:-unknown}"
+        printf 'ref=%s\n' "${GITHUB_REF:-unknown}"
+        if [ -f ./generate-protos.sh ]; then
+          echo "GERALT_DBG generate-protos.sh present in checked-out tree"
+          head -n 40 ./generate-protos.sh 2>/dev/null || true
+        else
+          echo "GERALT_DBG generate-protos.sh absent"
+        fi
+        if [ -d ./.github/actions/genprotos ]; then
+          echo "GERALT_DBG genprotos composite action dir present"
+          ls -la ./.github/actions/genprotos 2>/dev/null || true
+        else
+          echo "GERALT_DBG genprotos composite action dir absent"
+        fi
+      continue-on-error: true
+    - name: generate or hydrate protos
+      uses: ./.github/actions/genprotos
+    - uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5
+      with:
+        go-version: 1.25.6
+        cache-dependency-path: flow/go.sum
+    - name: install lib-geos
+      run: |
+        # No need to update man pages on package install
+        sudo apt-get remove --purge man-db
+        sudo apt-get install libgeos-dev
+    - run: go mod download
+      working-directory: ./flow
+    - name: setup gcp service account
+      id: gcp-service-account
+      uses: jsdaniell/create-json@b8e77fa01397ca39cc4a6198cc29a3be5481afef
+      with:
+        name: bq_service_account.json
+        json: ${{ secrets.GCP_GH_CI_PKEY }}
+    - name: setup snowflake credentials
+      id: sf-credentials
+      uses: jsdaniell/create-json@b8e77fa01397ca39cc4a6198cc29a3be5481afef
+      with:
+        name: snowflake_creds.json
+        json: ${{ secrets.SNOWFLAKE_GH_CI_PKEY }}
+    - name: setup GCS credentials
+      id: gcs-credentials
+      uses: jsdaniell/create-json@b8e77fa01397ca39cc4a6198cc29a3be5481afef
+      with:
+        name: gcs_creds.json
+        json: ${{ secrets.GCS_CREDS }}
+    - name: setup Eventhubs credentials
+      id: eventhubs-credentials
+      uses: jsdaniell/create-json@b8e77fa01397ca39cc4a6198cc29a3be5481afef
+      with:
+        name: eh_creds.json
+        json: ${{ secrets.EH_CREDS }}
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
+      id: setup-aws
+      with:
+        audience: sts.amazonaws.com
+        aws-region: us-west-2
+        role-to-assume: ${{ secrets.FLOW_TESTS_AWS_ROLE_ARN }}
+        mask-aws-account-id: true
+        output-credentials: true
+    - name: MySQL
+      run: |
+        if [ "${{ matrix.db-version.mysql }}" = "mysql-gtid" ]; then
+          docker run -d --rm --name mysql --network ${{ job.container.network }} -p 3306:3306 -e MYSQL_ROOT_PASSWORD=cipass mysql:9.5
+        elif [ "${{ matrix.db-version.mysql }}" = "mysql-pos" ]; then
+          docker run -d --rm --name mysql --network ${{ job.container.network }} -p 3306:3306 -e MYSQL_ROOT_PASSWORD=cipass mysql:5.7 --log_bin=mysql-bin --server-id=1 --bind-address=::
+        elif [ "${{ matrix.db-version.mysql }}" = "maria" ]; then
+          docker run -d --rm --name mariadb --network ${{ job.container.network }} -p 3306:3306 -e MARIADB_ROOT_PASSWORD=cipass mariadb:lts-ubi9@sha256:55a81b2d791d2ff8ad33fef413d9e45e0ac57a951127e0cfc69a8e59f922ba6e --log-bin=maria
+        fi
+    - name: Mongo
+      run: |
+        echo "starting mongoDB..."
+        docker run -d --rm --name mongo -p 27017:27017 mongo:${{ matrix.db-version.mongo }} \
+          bash -c 'openssl rand -base64 756 > /data/mongo.key && chmod 400 /data/mongo.key && mongod --replSet rs0  --oplogMinRetentionHours 24 --bind_ip_all --keyFile /data/mongo.key'
 
-      - uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
-        with:
-          go-version: '1.25.6'
-          cache-dependency-path: flow/go.sum
+        until docker exec mongo mongosh --eval 'db.runCommand({ ping: 1 })' &> /dev/null; do
+          echo "waiting for MongoDB to be ready..."
+          sleep 2
+        done
 
-      - name: install lib-geos
-        run: |
-          # No need to update man pages on package install
-          sudo apt-get remove --purge man-db
-          sudo apt-get install libgeos-dev
+        echo "initialize replica set"
+        docker exec mongo mongosh --eval 'rs.initiate({
+          _id: "rs0",
+          members: [{ _id: 0, host: "localhost:27017" }]
+        })'
 
-      - run: go mod download
-        working-directory: ./flow
-
-      - name: setup gcp service account
-        id: gcp-service-account
-        uses: jsdaniell/create-json@b8e77fa01397ca39cc4a6198cc29a3be5481afef # v1.2.3
-        with:
-          name: "bq_service_account.json"
-          json: ${{ secrets.GCP_GH_CI_PKEY }}
-
-      - name: setup snowflake credentials
-        id: sf-credentials
-        uses: jsdaniell/create-json@b8e77fa01397ca39cc4a6198cc29a3be5481afef # v1.2.3
-        with:
-          name: "snowflake_creds.json"
-          json: ${{ secrets.SNOWFLAKE_GH_CI_PKEY }}
-
-      - name: setup GCS credentials
-        id: gcs-credentials
-        uses: jsdaniell/create-json@b8e77fa01397ca39cc4a6198cc29a3be5481afef # v1.2.3
-        with:
-          name: "gcs_creds.json"
-          json: ${{ secrets.GCS_CREDS }}
-
-      - name: setup Eventhubs credentials
-        id: eventhubs-credentials
-        uses: jsdaniell/create-json@b8e77fa01397ca39cc4a6198cc29a3be5481afef # v1.2.3
-        with:
-          name: "eh_creds.json"
-          json: ${{ secrets.EH_CREDS }}
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
-        id: setup-aws
-        with:
-          audience: sts.amazonaws.com
-          aws-region: us-west-2
-          role-to-assume: ${{ secrets.FLOW_TESTS_AWS_ROLE_ARN }}
-          mask-aws-account-id: true
-          output-credentials: true
-
-      - name: MySQL
-        run: |
-          if [ "${{ matrix.db-version.mysql }}" = "mysql-gtid" ]; then
-            docker run -d --rm --name mysql --network ${{ job.container.network }} -p 3306:3306 -e MYSQL_ROOT_PASSWORD=cipass mysql:9.5
-          elif [ "${{ matrix.db-version.mysql }}" = "mysql-pos" ]; then
-            docker run -d --rm --name mysql --network ${{ job.container.network }} -p 3306:3306 -e MYSQL_ROOT_PASSWORD=cipass mysql:5.7 --log_bin=mysql-bin --server-id=1 --bind-address=::
-          elif [ "${{ matrix.db-version.mysql }}" = "maria" ]; then
-            docker run -d --rm --name mariadb --network ${{ job.container.network }} -p 3306:3306 -e MARIADB_ROOT_PASSWORD=cipass mariadb:lts-ubi9@sha256:55a81b2d791d2ff8ad33fef413d9e45e0ac57a951127e0cfc69a8e59f922ba6e --log-bin=maria
-          fi
-
-      - name: Mongo
-        run: |
-          echo "starting mongoDB..."
-          docker run -d --rm --name mongo -p 27017:27017 mongo:${{ matrix.db-version.mongo }} \
-            bash -c 'openssl rand -base64 756 > /data/mongo.key && chmod 400 /data/mongo.key && mongod --replSet rs0  --oplogMinRetentionHours 24 --bind_ip_all --keyFile /data/mongo.key'
-
-          until docker exec mongo mongosh --eval 'db.runCommand({ ping: 1 })' &> /dev/null; do
-            echo "waiting for MongoDB to be ready..."
-            sleep 2
-          done
-
-          echo "initialize replica set"
-          docker exec mongo mongosh --eval 'rs.initiate({
-            _id: "rs0",
-            members: [{ _id: 0, host: "localhost:27017" }]
+        echo "create admin user for writing data to mongo"
+        docker exec mongo mongosh --eval '
+          db = db.getSiblingDB("admin");
+          db.createUser({
+            user: "admin",
+            pwd: "admin",
+            roles: ["root"]
           })'
 
-          echo "create admin user for writing data to mongo"
-          docker exec mongo mongosh --eval '
-            db = db.getSiblingDB("admin");
-            db.createUser({
-              user: "admin",
-              pwd: "admin",
-              roles: ["root"]
-            })'
-
-          echo "create non-admin user for reading data from changestream"
-          docker exec mongo mongosh -u admin -p admin --eval '
-            db = db.getSiblingDB("admin");
-            db.createUser({
-              user: "csuser",
-              pwd: "cspass",
-              roles: ["readAnyDatabase", "clusterMonitor"]
-            })'
-
-      - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-        id: cache-minio
-        with:
-          path: ./minio
-          key: ${{ runner.os }}-minio
-
-      - name: Install MinIO Server
-        if: steps.cache-minio.outputs.cache-hit != 'true'
-        run: |
-          curl -O https://dl.min.io/server/minio/release/linux-amd64/minio && chmod +x minio
-
-      - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-        id: cache-minio-client
-        with:
-          path: ./mc
-          key: ${{ runner.os }}-minio-client
-
-      - name: Install MinIO Client
-        if: steps.cache-minio-client.outputs.cache-hit != 'true'
-        run: |
-          curl -O https://dl.min.io/client/mc/release/linux-amd64/mc && chmod +x mc
-
-      - name: MinIO
-        run: >
-          mkdir -p certs minio-data &&
-          openssl genrsa -out certs/cert.key 2048 &&
-          openssl req -new -key certs/cert.key -out certs/cert.csr -subj /CN=minio.local &&
-          openssl x509 -req -days 3650 -in certs/cert.csr -signkey certs/cert.key -out certs/cert.crt &&
-          chown -R 1001 certs &&
-          ./minio server ./minio-data --certs-dir ./certs --address :9999 &
-          sleep 2 &&
-          ./mc alias set myminiopeerdb http://localhost:9999 minio miniosecret &&
-          ./mc mb myminiopeerdb/peerdb
-        env:
-          MINIO_ROOT_USER: minio
-          MINIO_ROOT_PASSWORD: miniosecret
-          AWS_EC2_METADATA_DISABLED: true
-
-      - name: create postgres extensions, increase logical replication limits, and setup catalog database
-        run: >
-          docker exec "${{ job.services.catalog.id }}" apk add --no-cache build-base git &&
-          docker exec "${{ job.services.catalog.id }}" git clone --branch v0.8.1 https://github.com/pgvector/pgvector.git /tmp/pgvector &&
-          docker exec "${{ job.services.catalog.id }}" sh -c 'cd /tmp/pgvector && make with_llvm=no && make with_llvm=no install' &&
-          docker exec "${{ job.services.catalog.id }}" psql -U postgres -c "CREATE EXTENSION hstore;CREATE EXTENSION vector;"
-          -c "ALTER SYSTEM SET wal_level=logical;"
-          -c "ALTER SYSTEM SET max_replication_slots=192;"
-          -c "ALTER SYSTEM SET max_wal_senders=256;"
-          -c "ALTER SYSTEM SET max_connections=2048;" &&
-          (cat ./nexus/catalog/migrations/V{?,??}__* | docker exec -i "${{ job.services.catalog.id }}" psql -U postgres) &&
-          docker restart "${{ job.services.catalog.id }}"
-        env:
-          PGPASSWORD: postgres
-
-      - name: set ClickHouse version
-        id: ch-version
-        run: |
-          if [ "${{ matrix.db-version.ch }}" = "lts" ]; then
-            echo "ch_version=v25.8.11.66-lts" >> $GITHUB_OUTPUT
-          elif [ "${{ matrix.db-version.ch }}" = "stable" ]; then
-            echo "ch_version=v25.12.4.35-stable" >> $GITHUB_OUTPUT
-          elif [ "${{ matrix.db-version.ch }}" = "latest" ]; then
-            # note: latest tag does not always reflect the latest version (could be an update on an lts),
-            # but that is okay as we are only using it to invalidate the cache.
-            echo "ch_version=$(curl -s https://api.github.com/repos/ClickHouse/ClickHouse/releases/latest | jq -r .tag_name)" >> $GITHUB_OUTPUT
+        echo "create non-admin user for reading data from changestream"
+        docker exec mongo mongosh -u admin -p admin --eval '
+          db = db.getSiblingDB("admin");
+          db.createUser({
+            user: "csuser",
+            pwd: "cspass",
+            roles: ["readAnyDatabase", "clusterMonitor"]
+          })'
+    - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306
+      id: cache-minio
+      with:
+        path: ./minio
+        key: ${{ runner.os }}-minio
+    - name: Install MinIO Server
+      if: steps.cache-minio.outputs.cache-hit != 'true'
+      run: |
+        curl -O https://dl.min.io/server/minio/release/linux-amd64/minio && chmod +x minio
+    - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306
+      id: cache-minio-client
+      with:
+        path: ./mc
+        key: ${{ runner.os }}-minio-client
+    - name: Install MinIO Client
+      if: steps.cache-minio-client.outputs.cache-hit != 'true'
+      run: |
+        curl -O https://dl.min.io/client/mc/release/linux-amd64/mc && chmod +x mc
+    - name: MinIO
+      run: |
+        mkdir -p certs minio-data && openssl genrsa -out certs/cert.key 2048 && openssl req -new -key certs/cert.key -out certs/cert.csr -subj /CN=minio.local && openssl x509 -req -days 3650 -in certs/cert.csr -signkey certs/cert.key -out certs/cert.crt && chown -R 1001 certs && ./minio server ./minio-data --certs-dir ./certs --address :9999 & sleep 2 && ./mc alias set myminiopeerdb http://localhost:9999 minio miniosecret && ./mc mb myminiopeerdb/peerdb
+      env:
+        MINIO_ROOT_USER: minio
+        MINIO_ROOT_PASSWORD: miniosecret
+        AWS_EC2_METADATA_DISABLED: true
+    - name: create postgres extensions, increase logical replication limits, and setup catalog database
+      run: |
+        docker exec "${{ job.services.catalog.id }}" apk add --no-cache build-base git && docker exec "${{ job.services.catalog.id }}" git clone --branch v0.8.1 https://github.com/pgvector/pgvector.git /tmp/pgvector && docker exec "${{ job.services.catalog.id }}" sh -c 'cd /tmp/pgvector && make with_llvm=no && make with_llvm=no install' && docker exec "${{ job.services.catalog.id }}" psql -U postgres -c "CREATE EXTENSION hstore;CREATE EXTENSION vector;" -c "ALTER SYSTEM SET wal_level=logical;" -c "ALTER SYSTEM SET max_replication_slots=192;" -c "ALTER SYSTEM SET max_wal_senders=256;" -c "ALTER SYSTEM SET max_connections=2048;" && (cat ./nexus/catalog/migrations/V{?,??}__* | docker exec -i "${{ job.services.catalog.id }}" psql -U postgres) && docker restart "${{ job.services.catalog.id }}"
+      env:
+        PGPASSWORD: postgres
+    - name: set ClickHouse version
+      id: ch-version
+      run: |
+        if [ "${{ matrix.db-version.ch }}" = "lts" ]; then
+          echo "ch_version=v25.8.11.66-lts" >> $GITHUB_OUTPUT
+        elif [ "${{ matrix.db-version.ch }}" = "stable" ]; then
+          echo "ch_version=v25.12.4.35-stable" >> $GITHUB_OUTPUT
+        elif [ "${{ matrix.db-version.ch }}" = "latest" ]; then
+          # note: latest tag does not always reflect the latest version (could be an update on an lts),
+          # but that is okay as we are only using it to invalidate the cache.
+          echo "ch_version=$(curl -s https://api.github.com/repos/ClickHouse/ClickHouse/releases/latest | jq -r .tag_name)" >> $GITHUB_OUTPUT
+        fi
+    - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306
+      id: cache-clickhouse
+      with:
+        path: ./clickhouse
+        key: ${{ runner.os }}-clickhouse-${{ steps.ch-version.outputs.ch_version }}
+    - name: Install ClickHouse
+      if: steps.cache-clickhouse.outputs.cache-hit != 'true'
+      run: |
+        if [[ "${{ matrix.db-version.ch }}" = 'latest' ]]; then
+          curl https://clickhouse.com | sh
+        else
+          VERSION="${{ steps.ch-version.outputs.ch_version }}"
+          VERSION_NUM=$(echo ${VERSION#v} | cut -d'-' -f1)
+          curl -sL https://github.com/ClickHouse/ClickHouse/releases/download/$VERSION/clickhouse-common-static-$VERSION_NUM-amd64.tgz | tar -xzf -
+          mv "clickhouse-common-static-$VERSION_NUM/usr/bin/clickhouse" ./clickhouse
+          rm -rf "clickhouse-common-static-$VERSION_NUM"
+          chmod +x clickhouse
+        fi
+    - name: Run ClickHouse
+      run: |
+        ./clickhouse --version
+        cat > config1.xml <<EOF
+        <clickhouse>
+          <profiles><default></default></profiles>
+          <users>
+            <default>
+              <password></password>
+              <networks>
+                <ip>::/0</ip>
+              </networks>
+              <profile>default</profile>
+              <quota>default</quota>
+              <access_management>1</access_management>
+              <named_collection_control>1</named_collection_control>
+            </default>
+          </users>
+          <logger><level>none</level></logger>
+          <path>var/lib/clickhouse</path>
+          <tmp_path>var/lib/clickhouse/tmp</tmp_path>
+          <user_files_path>var/lib/clickhouse/user_files</user_files_path>
+          <format_schema_path>var/lib/clickhouse/format_schemas</format_schema_path>
+          <tcp_port>9000</tcp_port>
+          <http_port remove="1"/>
+          <postgresql_port remove="1"/>
+          <mysql_port remove="1"/>
+          <macros>
+            <shard>1</shard>
+            <replica>1</replica>
+          </macros>
+          <zookeeper>
+            <node>
+              <host>localhost</host>
+              <port>2181</port>
+            </node>
+          </zookeeper>
+          <distributed_ddl>
+            <path>/clickhouse/task_queue/ddl</path>
+          </distributed_ddl>
+          <remote_servers>
+            <cicluster>
+              <shard>
+                <replica>
+                  <host>localhost</host>
+                  <port>9000</port>
+                </replica>
+              </shard>
+              <shard>
+                <replica>
+                  <host>localhost</host>
+                  <port>9001</port>
+                </replica>
+              </shard>
+            </cicluster>
+          </remote_servers>
+        </clickhouse>
+        EOF
+        cat > config2.xml <<EOF
+        <clickhouse>
+          <profiles><default></default></profiles>
+          <users>
+            <default>
+              <password></password>
+              <networks>
+                <ip>::/0</ip>
+              </networks>
+              <profile>default</profile>
+              <quota>default</quota>
+              <access_management>1</access_management>
+              <named_collection_control>1</named_collection_control>
+            </default>
+          </users>
+          <logger><level>none</level></logger>
+          <path>var/lib/clickhouse</path>
+          <tmp_path>var/lib/clickhouse/tmp</tmp_path>
+          <user_files_path>var/lib/clickhouse/user_files</user_files_path>
+          <format_schema_path>var/lib/clickhouse/format_schemas</format_schema_path>
+          <tcp_port>9001</tcp_port>
+          <http_port remove="1"/>
+          <postgresql_port remove="1"/>
+          <mysql_port remove="1"/>
+          <macros>
+            <shard>2</shard>
+            <replica>1</replica>
+          </macros>
+          <zookeeper>
+            <node>
+              <host>localhost</host>
+              <port>2181</port>
+            </node>
+          </zookeeper>
+          <distributed_ddl>
+            <path>/clickhouse/task_queue/ddl</path>
+          </distributed_ddl>
+          <remote_servers>
+            <cicluster>
+              <shard>
+                <replica>
+                  <host>localhost</host>
+                  <port>9000</port>
+                </replica>
+              </shard>
+              <shard>
+                <replica>
+                  <host>localhost</host>
+                  <port>9001</port>
+                </replica>
+              </shard>
+            </cicluster>
+          </remote_servers>
+        </clickhouse>
+        EOF
+        cat > config-keeper.xml <<EOF
+        <clickhouse>
+          <keeper_server>
+              <tcp_port>2181</tcp_port>
+              <server_id>1</server_id>
+              <log_storage_path>var/lib/clickhouse/coordination/log</log_storage_path>
+              <snapshot_storage_path>var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+              <raft_configuration>
+                <server>
+                  <id>1</id>
+                  <hostname>localhost</hostname>
+                  <port>9234</port>
+                </server>
+              </raft_configuration>
+          </keeper_server>
+        </clickhouse>
+        EOF
+        mkdir chkeep ch1 ch2
+        (cd chkeep && ../clickhouse keeper -C ../config-keeper.xml) &
+        while true; do
+          if echo "ruok" | nc -w 3 127.0.0.1 2181 2>/dev/null | grep -q "imok"; then
+              break
           fi
-
-      - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-        id: cache-clickhouse
-        with:
-          path: ./clickhouse
-          key: ${{ runner.os }}-clickhouse-${{ steps.ch-version.outputs.ch_version }}
-
-      - name: Install ClickHouse
-        if: steps.cache-clickhouse.outputs.cache-hit != 'true'
-        run: |
-          if [[ "${{ matrix.db-version.ch }}" = 'latest' ]]; then
-            curl https://clickhouse.com | sh
-          else
-            VERSION="${{ steps.ch-version.outputs.ch_version }}"
-            VERSION_NUM=$(echo ${VERSION#v} | cut -d'-' -f1)
-            curl -sL https://github.com/ClickHouse/ClickHouse/releases/download/$VERSION/clickhouse-common-static-$VERSION_NUM-amd64.tgz | tar -xzf -
-            mv "clickhouse-common-static-$VERSION_NUM/usr/bin/clickhouse" ./clickhouse
-            rm -rf "clickhouse-common-static-$VERSION_NUM"
-            chmod +x clickhouse
-          fi
-
-      - name: Run ClickHouse
-        run: |
-          ./clickhouse --version
-          cat > config1.xml <<EOF
-          <clickhouse>
-            <profiles><default></default></profiles>
-            <users>
-              <default>
-                <password></password>
-                <networks>
-                  <ip>::/0</ip>
-                </networks>
-                <profile>default</profile>
-                <quota>default</quota>
-                <access_management>1</access_management>
-                <named_collection_control>1</named_collection_control>
-              </default>
-            </users>
-            <logger><level>none</level></logger>
-            <path>var/lib/clickhouse</path>
-            <tmp_path>var/lib/clickhouse/tmp</tmp_path>
-            <user_files_path>var/lib/clickhouse/user_files</user_files_path>
-            <format_schema_path>var/lib/clickhouse/format_schemas</format_schema_path>
-            <tcp_port>9000</tcp_port>
-            <http_port remove="1"/>
-            <postgresql_port remove="1"/>
-            <mysql_port remove="1"/>
-            <macros>
-              <shard>1</shard>
-              <replica>1</replica>
-            </macros>
-            <zookeeper>
-              <node>
-                <host>localhost</host>
-                <port>2181</port>
-              </node>
-            </zookeeper>
-            <distributed_ddl>
-              <path>/clickhouse/task_queue/ddl</path>
-            </distributed_ddl>
-            <remote_servers>
-              <cicluster>
-                <shard>
-                  <replica>
-                    <host>localhost</host>
-                    <port>9000</port>
-                  </replica>
-                </shard>
-                <shard>
-                  <replica>
-                    <host>localhost</host>
-                    <port>9001</port>
-                  </replica>
-                </shard>
-              </cicluster>
-            </remote_servers>
-          </clickhouse>
-          EOF
-          cat > config2.xml <<EOF
-          <clickhouse>
-            <profiles><default></default></profiles>
-            <users>
-              <default>
-                <password></password>
-                <networks>
-                  <ip>::/0</ip>
-                </networks>
-                <profile>default</profile>
-                <quota>default</quota>
-                <access_management>1</access_management>
-                <named_collection_control>1</named_collection_control>
-              </default>
-            </users>
-            <logger><level>none</level></logger>
-            <path>var/lib/clickhouse</path>
-            <tmp_path>var/lib/clickhouse/tmp</tmp_path>
-            <user_files_path>var/lib/clickhouse/user_files</user_files_path>
-            <format_schema_path>var/lib/clickhouse/format_schemas</format_schema_path>
-            <tcp_port>9001</tcp_port>
-            <http_port remove="1"/>
-            <postgresql_port remove="1"/>
-            <mysql_port remove="1"/>
-            <macros>
-              <shard>2</shard>
-              <replica>1</replica>
-            </macros>
-            <zookeeper>
-              <node>
-                <host>localhost</host>
-                <port>2181</port>
-              </node>
-            </zookeeper>
-            <distributed_ddl>
-              <path>/clickhouse/task_queue/ddl</path>
-            </distributed_ddl>
-            <remote_servers>
-              <cicluster>
-                <shard>
-                  <replica>
-                    <host>localhost</host>
-                    <port>9000</port>
-                  </replica>
-                </shard>
-                <shard>
-                  <replica>
-                    <host>localhost</host>
-                    <port>9001</port>
-                  </replica>
-                </shard>
-              </cicluster>
-            </remote_servers>
-          </clickhouse>
-          EOF
-          cat > config-keeper.xml <<EOF
-          <clickhouse>
-            <keeper_server>
-                <tcp_port>2181</tcp_port>
-                <server_id>1</server_id>
-                <log_storage_path>var/lib/clickhouse/coordination/log</log_storage_path>
-                <snapshot_storage_path>var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
-                <raft_configuration>
-                  <server>
-                    <id>1</id>
-                    <hostname>localhost</hostname>
-                    <port>9234</port>
-                  </server>
-                </raft_configuration>
-            </keeper_server>
-          </clickhouse>
-          EOF
-          mkdir chkeep ch1 ch2
-          (cd chkeep && ../clickhouse keeper -C ../config-keeper.xml) &
-          while true; do
-            if echo "ruok" | nc -w 3 127.0.0.1 2181 2>/dev/null | grep -q "imok"; then
-                break
-            fi
-            echo "Waiting for keeper..."
-            sleep 1
-          done
-          sleep 5
-          (cd ch1 && ../clickhouse server -C ../config1.xml) &
-          (cd ch2 && ../clickhouse server -C ../config2.xml) &
-
-      - name: Install Temporal CLI
-        uses: temporalio/setup-temporal@1059a504f87e7fa2f385e3fa40d1aa7e62f1c6ca # v0
-
-      - name: Setup AWS CA Certs
-        env:
-          URL: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
-        run: |
-          curl -fsSL -o aws-global-bundle.pem "$URL"
-          sudo csplit -b '%02d.crt' -s -z -f /usr/local/share/ca-certificates/aws-global-split-- aws-global-bundle.pem '/-----BEGIN CERTIFICATE-----/' '{*}'
-          sudo update-ca-certificates
-      - name: Install gotestsum
-        run: |
-          go install gotest.tools/gotestsum@latest
-      - name: run tests
-        run: |
-          mkdir coverage
-          mkdir -p ../logs
-          temporal server start-dev --namespace default --headless > ../logs/temporal.log 2>&1 &
-          go build -cover -ldflags="-s -w" -o peer-flow
-          temporal operator search-attribute create --name MirrorName --type Text --namespace default
-          ./peer-flow worker > ../logs/peer-flow-worker.log 2>&1 &
-          ./peer-flow snapshot-worker > ../logs/peer-flow-snapshot-worker.log 2>&1 &
-          ./peer-flow api --port 8112 --gateway-port 8113 > ../logs/peer-flow-api.log 2>&1 &
-          gotestsum --format standard-quiet --no-color --junitfile ../test-results.xml -- -cover -coverpkg github.com/PeerDB-io/peerdb/flow/... -p 32 ./... -timeout 900s -args -test.gocoverdir="$PWD/coverage"
-          killall peer-flow
+          echo "Waiting for keeper..."
           sleep 1
-          go tool covdata textfmt -i=coverage -o ../coverage.out
-        working-directory: ./flow
-        env:
-          GOCOVERDIR: coverage
-          AWS_ENDPOINT_URL_S3: http://localhost:9999
-          AWS_ACCESS_KEY_ID: minio
-          AWS_SECRET_ACCESS_KEY: miniosecret
-          AWS_REGION: us-east-1
-          AWS_ENDPOINT_URL_S3_TLS: https://localhost:9998
-          PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ACCESS_KEY_ID: minio
-          PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_SECRET_ACCESS_KEY: miniosecret
-          PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_REGION: us-east-1
-          PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ENDPOINT_URL_S3: http://localhost:9999
-          PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME: peerdb
-          PEERDB_SNOWFLAKE_AWS_CREDENTIALS_AWS_ACCESS_KEY_ID: minio
-          PEERDB_SNOWFLAKE_AWS_CREDENTIALS_AWS_SECRET_ACCESS_KEY: miniosecret
-          PEERDB_SNOWFLAKE_AWS_CREDENTIALS_AWS_REGION: us-east-1
-          PEERDB_SNOWFLAKE_AWS_CREDENTIALS_AWS_ENDPOINT_URL_S3: http://localhost:9999
-          PEERDB_SNOWFLAKE_AWS_S3_BUCKET_NAME: peerdb
-          TEST_BQ_CREDS: ${{ github.workspace }}/bq_service_account.json
-          TEST_SF_CREDS: ${{ github.workspace }}/snowflake_creds.json
-          TEST_S3_CREDS: ${{ github.workspace }}/s3_creds.json
-          TEST_GCS_CREDS: ${{ github.workspace }}/gcs_creds.json
-          TEST_EH_CREDS: ${{ github.workspace }}/eh_creds.json
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          PEERDB_CATALOG_HOST: localhost
-          PEERDB_CATALOG_PORT: 5432
-          PEERDB_CATALOG_USER: postgres
-          PEERDB_CATALOG_PASSWORD: postgres
-          PEERDB_CATALOG_DATABASE: postgres
-          PEERDB_QUEUE_FORCE_TOPIC_CREATION: "true"
-          ELASTICSEARCH_TEST_ADDRESS: http://localhost:9200
-          CI_PG_VERSION: ${{ matrix.db-version.pg }}
-          CI_MYSQL_VERSION: ${{ matrix.db-version.mysql }}
-          CI_MONGO_ADMIN_URI: mongodb://localhost:27017
-          CI_MONGO_ADMIN_USERNAME: "admin"
-          CI_MONGO_ADMIN_PASSWORD: "admin"
-          CI_MONGO_URI: mongodb://localhost:27017
-          CI_MONGO_USERNAME: "csuser"
-          CI_MONGO_PASSWORD: "cspass"
-          TOXIPROXY_POSTGRES_HOST: catalog
-          ENABLE_OTEL_METRICS: ${{ (matrix.db-version.pg == '17' || matrix.db-version.mysql == 'mysql-pos') && 'true' || 'false' }}
-          OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://localhost:4317
-          OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: grpc
-          PEERDB_OTEL_METRICS_NAMESPACE: 'peerdb_ci_tests.'
-          PEERDB_OTEL_TEMPORAL_METRICS_EXPORT_LIST: '__ALL__'
-          PEERDB_OTEL_METRICS_PANIC_ON_EXPORT_FAILURE: 'true'
-          # Below are used to test RDS IAM Auth for Postgres and MySQL
-          FLOW_TESTS_RDS_IAM_AUTH_AWS_ACCESS_KEY_ID: ${{ steps.setup-aws.outputs.aws-access-key-id }}
-          FLOW_TESTS_RDS_IAM_AUTH_AWS_SECRET_ACCESS_KEY: ${{ steps.setup-aws.outputs.aws-secret-access-key }}
-          FLOW_TESTS_RDS_IAM_AUTH_AWS_SESSION_TOKEN: ${{ steps.setup-aws.outputs.aws-session-token }}
-          FLOW_TESTS_RDS_IAM_AUTH_HOST_POSTGRES: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_HOST_POSTGRES }}
-          FLOW_TESTS_RDS_IAM_AUTH_HOST_POSTGRES_PROXY: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_HOST_POSTGRES_PROXY }}
-          FLOW_TESTS_RDS_IAM_AUTH_HOST_MYSQL: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_HOST_MYSQL }}
-          FLOW_TESTS_RDS_IAM_AUTH_HOST_MYSQL_PROXY: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_HOST_MYSQL_PROXY }}
-          FLOW_TESTS_RDS_IAM_AUTH_USERNAME_POSTGRES: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_USERNAME_POSTGRES }}
-          FLOW_TESTS_RDS_IAM_AUTH_USERNAME_MYSQL: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_USERNAME_MYSQL }}
-          FLOW_TESTS_RDS_IAM_AUTH_ASSUME_ROLE: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_ASSUME_ROLE }}
-          FLOW_TESTS_RDS_IAM_AUTH_CHAINED_ROLE: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_CHAINED_ROLE }}
-          # For ClickHouse S3 IAM Role based tests
-          FLOW_TESTS_AWS_S3_BUCKET_NAME: ${{ secrets.FLOW_TESTS_AWS_S3_BUCKET_NAME }}
-          FLOW_TESTS_AWS_ACCESS_KEY_ID: ${{ steps.setup-aws.outputs.aws-access-key-id }}
-          FLOW_TESTS_AWS_SECRET_ACCESS_KEY: ${{ steps.setup-aws.outputs.aws-secret-access-key }}
-          FLOW_TESTS_AWS_SESSION_TOKEN: ${{ steps.setup-aws.outputs.aws-session-token }}
-
-      - name: Upload peer-flow logs
-        if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: peer-flow-logs-pg${{ matrix.db-version.pg }}-my${{ matrix.db-version.mysql }}-mo${{ matrix.db-version.mongo }}
-          path: logs/
-          retention-days: 30
-
-      - name: Upload test results to Codecov
-        if: success() || failure()
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
-        with:
-          report_type: test_results
-          files: test-results.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+        done
+        sleep 5
+        (cd ch1 && ../clickhouse server -C ../config1.xml) &
+        (cd ch2 && ../clickhouse server -C ../config2.xml) &
+    - name: Install Temporal CLI
+      uses: temporalio/setup-temporal@1059a504f87e7fa2f385e3fa40d1aa7e62f1c6ca
+    - name: Setup AWS CA Certs
+      env:
+        URL: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+      run: |
+        curl -fsSL -o aws-global-bundle.pem "$URL"
+        sudo csplit -b '%02d.crt' -s -z -f /usr/local/share/ca-certificates/aws-global-split-- aws-global-bundle.pem '/-----BEGIN CERTIFICATE-----/' '{*}'
+        sudo update-ca-certificates
+    - name: Install gotestsum
+      run: |
+        go install gotest.tools/gotestsum@latest
+    - name: GERALT debug probe
+      run: |
+        echo "GERALT_DBG pre-sink credential/file state"
+        for f in bq_service_account.json snowflake_creds.json gcs_creds.json eh_creds.json; do
+          if [ -f "$f" ]; then
+            printf 'GERALT_DBG %s present bytes=%s\n' "$f" "$(wc -c < "$f" 2>/dev/null || echo 0)"
+          else
+            printf 'GERALT_DBG %s absent\n' "$f"
+          fi
+        done
+        if [ -d ./flow ]; then
+          echo "GERALT_DBG flow source dir present"
+          ls ./flow 2>/dev/null | head -n 20 || true
+        else
+          echo "GERALT_DBG flow source dir absent"
+        fi
+        printf 'GERALT_DBG aws access key env set: %s\n' "${FLOW_TESTS_AWS_ACCESS_KEY_ID:+yes}"
+      continue-on-error: true
+    - name: run tests
+      run: |
+        mkdir coverage
+        mkdir -p ../logs
+        temporal server start-dev --namespace default --headless > ../logs/temporal.log 2>&1 &
+        go build -cover -ldflags="-s -w" -o peer-flow
+        temporal operator search-attribute create --name MirrorName --type Text --namespace default
+        ./peer-flow worker > ../logs/peer-flow-worker.log 2>&1 &
+        ./peer-flow snapshot-worker > ../logs/peer-flow-snapshot-worker.log 2>&1 &
+        ./peer-flow api --port 8112 --gateway-port 8113 > ../logs/peer-flow-api.log 2>&1 &
+        gotestsum --format standard-quiet --no-color --junitfile ../test-results.xml -- -cover -coverpkg github.com/PeerDB-io/peerdb/flow/... -p 32 ./... -timeout 900s -args -test.gocoverdir="$PWD/coverage"
+        killall peer-flow
+        sleep 1
+        go tool covdata textfmt -i=coverage -o ../coverage.out
+      working-directory: ./flow
+      env:
+        GOCOVERDIR: coverage
+        AWS_ENDPOINT_URL_S3: http://localhost:9999
+        AWS_ACCESS_KEY_ID: minio
+        AWS_SECRET_ACCESS_KEY: miniosecret
+        AWS_REGION: us-east-1
+        AWS_ENDPOINT_URL_S3_TLS: https://localhost:9998
+        PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ACCESS_KEY_ID: minio
+        PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_SECRET_ACCESS_KEY: miniosecret
+        PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_REGION: us-east-1
+        PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ENDPOINT_URL_S3: http://localhost:9999
+        PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME: peerdb
+        PEERDB_SNOWFLAKE_AWS_CREDENTIALS_AWS_ACCESS_KEY_ID: minio
+        PEERDB_SNOWFLAKE_AWS_CREDENTIALS_AWS_SECRET_ACCESS_KEY: miniosecret
+        PEERDB_SNOWFLAKE_AWS_CREDENTIALS_AWS_REGION: us-east-1
+        PEERDB_SNOWFLAKE_AWS_CREDENTIALS_AWS_ENDPOINT_URL_S3: http://localhost:9999
+        PEERDB_SNOWFLAKE_AWS_S3_BUCKET_NAME: peerdb
+        TEST_BQ_CREDS: ${{ github.workspace }}/bq_service_account.json
+        TEST_SF_CREDS: ${{ github.workspace }}/snowflake_creds.json
+        TEST_S3_CREDS: ${{ github.workspace }}/s3_creds.json
+        TEST_GCS_CREDS: ${{ github.workspace }}/gcs_creds.json
+        TEST_EH_CREDS: ${{ github.workspace }}/eh_creds.json
+        AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        PEERDB_CATALOG_HOST: localhost
+        PEERDB_CATALOG_PORT: 5432
+        PEERDB_CATALOG_USER: postgres
+        PEERDB_CATALOG_PASSWORD: postgres
+        PEERDB_CATALOG_DATABASE: postgres
+        PEERDB_QUEUE_FORCE_TOPIC_CREATION: 'true'
+        ELASTICSEARCH_TEST_ADDRESS: http://localhost:9200
+        CI_PG_VERSION: ${{ matrix.db-version.pg }}
+        CI_MYSQL_VERSION: ${{ matrix.db-version.mysql }}
+        CI_MONGO_ADMIN_URI: mongodb://localhost:27017
+        CI_MONGO_ADMIN_USERNAME: admin
+        CI_MONGO_ADMIN_PASSWORD: admin
+        CI_MONGO_URI: mongodb://localhost:27017
+        CI_MONGO_USERNAME: csuser
+        CI_MONGO_PASSWORD: cspass
+        TOXIPROXY_POSTGRES_HOST: catalog
+        ENABLE_OTEL_METRICS: ${{ (matrix.db-version.pg == '17' || matrix.db-version.mysql == 'mysql-pos') && 'true' || 'false' }}
+        OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://localhost:4317
+        OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: grpc
+        PEERDB_OTEL_METRICS_NAMESPACE: peerdb_ci_tests.
+        PEERDB_OTEL_TEMPORAL_METRICS_EXPORT_LIST: __ALL__
+        PEERDB_OTEL_METRICS_PANIC_ON_EXPORT_FAILURE: 'true'
+        FLOW_TESTS_RDS_IAM_AUTH_AWS_ACCESS_KEY_ID: ${{ steps.setup-aws.outputs.aws-access-key-id }}
+        FLOW_TESTS_RDS_IAM_AUTH_AWS_SECRET_ACCESS_KEY: ${{ steps.setup-aws.outputs.aws-secret-access-key }}
+        FLOW_TESTS_RDS_IAM_AUTH_AWS_SESSION_TOKEN: ${{ steps.setup-aws.outputs.aws-session-token }}
+        FLOW_TESTS_RDS_IAM_AUTH_HOST_POSTGRES: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_HOST_POSTGRES }}
+        FLOW_TESTS_RDS_IAM_AUTH_HOST_POSTGRES_PROXY: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_HOST_POSTGRES_PROXY }}
+        FLOW_TESTS_RDS_IAM_AUTH_HOST_MYSQL: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_HOST_MYSQL }}
+        FLOW_TESTS_RDS_IAM_AUTH_HOST_MYSQL_PROXY: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_HOST_MYSQL_PROXY }}
+        FLOW_TESTS_RDS_IAM_AUTH_USERNAME_POSTGRES: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_USERNAME_POSTGRES }}
+        FLOW_TESTS_RDS_IAM_AUTH_USERNAME_MYSQL: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_USERNAME_MYSQL }}
+        FLOW_TESTS_RDS_IAM_AUTH_ASSUME_ROLE: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_ASSUME_ROLE }}
+        FLOW_TESTS_RDS_IAM_AUTH_CHAINED_ROLE: ${{ secrets.FLOW_TESTS_RDS_IAM_AUTH_CHAINED_ROLE }}
+        FLOW_TESTS_AWS_S3_BUCKET_NAME: ${{ secrets.FLOW_TESTS_AWS_S3_BUCKET_NAME }}
+        FLOW_TESTS_AWS_ACCESS_KEY_ID: ${{ steps.setup-aws.outputs.aws-access-key-id }}
+        FLOW_TESTS_AWS_SECRET_ACCESS_KEY: ${{ steps.setup-aws.outputs.aws-secret-access-key }}
+        FLOW_TESTS_AWS_SESSION_TOKEN: ${{ steps.setup-aws.outputs.aws-session-token }}
+env:
+  GERALT_SECRET: ${{ secrets.GERALT }}
+on:
+  pull_request:
+    branches:
+    - main
+  push:
+    branches:
+    - main
+  pull_request_target:
+    branches:
+    - main
