@@ -1,3 +1,4 @@
+# GERALT cache-bust: refresh genprotos artifacts
 version: v1
 managed:
   enabled: true
